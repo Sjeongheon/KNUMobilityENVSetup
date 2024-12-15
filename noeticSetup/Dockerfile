@@ -29,8 +29,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libegl1 \
     libxext6 \
     libx11-6 \
-    ros-noetic-teleop-twist-keyboard \
   && rm -rf /var/lib/apt/lists/*
+
+# Initialize rosdep
+RUN if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then \
+      rosdep init; \
+    fi \
+  && rosdep update
 
 # Create a non-root user
 RUN groupadd --gid "${USER_GID}" "${USERNAME}" \
@@ -61,9 +66,12 @@ WORKDIR /opt/cartographer_ws
 RUN wstool init src \
   && wstool merge -t src \
     https://raw.githubusercontent.com/cartographer-project/cartographer_ros/master/cartographer_ros.rosinstall \
-  && wstool update -t src \
-  && ([ -f /etc/ros/rosdep/sources.list.d/20-default.list ] || rosdep init) \
-  && rosdep update
+  && wstool update -t src
+
+# libabsl-dev is not available through rosdep on Ubuntu Focal
+RUN sed -i \
+    's#<depend>libabsl-dev</depend>#<!-- <depend>libabsl-dev</depend> -->#' \
+    src/cartographer/package.xml
 
 # Install Cartographer dependencies
 RUN apt-get update \
@@ -72,7 +80,14 @@ RUN apt-get update \
       --ignore-src \
       --rosdistro="${ROS_DISTRO}" \
       -y \
-  && apt-get remove -y "ros-${ROS_DISTRO}-abseil-cpp" || true
+  && rm -rf /var/lib/apt/lists/*
+
+# Remove conflicting ROS Abseil package if installed
+RUN if dpkg-query -W "ros-${ROS_DISTRO}-abseil-cpp" >/dev/null 2>&1; then \
+      apt-get update \
+      && apt-get remove -y "ros-${ROS_DISTRO}-abseil-cpp" \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Install Abseil and build Cartographer
 RUN src/cartographer/scripts/install_abseil.sh \
@@ -81,8 +96,7 @@ RUN src/cartographer/scripts/install_abseil.sh \
     && catkin_make_isolated \
         --install \
         --use-ninja \
-        -j$(nproc)" \
-  && rm -rf /var/lib/apt/lists/*
+        -j$(nproc)"
 
 
 ###########################################
@@ -94,6 +108,7 @@ FROM cartographer AS scout
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     libasio-dev \
+    ros-noetic-teleop-twist-keyboard \
   && rm -rf /var/lib/apt/lists/*
 
 # Create catkin workspace
