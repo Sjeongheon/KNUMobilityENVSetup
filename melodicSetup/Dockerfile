@@ -1,9 +1,16 @@
 ###########################################
-# base image 
+# Base image
 ###########################################
 FROM osrf/ros:melodic-desktop-full AS base
 
-RUN apt-get update && apt-get install -y \
+ARG DEBIAN_FRONTEND=noninteractive
+
+ARG USERNAME=ros
+ARG USER_UID=1000
+ARG USER_GID=${USER_UID}
+
+# Install basic development dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python-rosdep \
     python-rosinstall \
     python-rosinstall-generator \
@@ -18,118 +25,149 @@ RUN apt-get update && apt-get install -y \
     vim \
     cmake \
     can-utils \
-  && rm -rf /var/lib/apt/lists/* \
-  && rosdep init || echo "rosdep already initialized"
+    sudo \
+  && rm -rf /var/lib/apt/lists/*
 
-# Setup environment
-ENV LD_LIBRARY_PATH=/opt/ros/melodic/lib
-ENV ROS_DISTRO=melodic
-ENV ROS_ROOT=/opt/ros/melodic/share/ros
-ENV ROS_PACKAGE_PATH=/opt/ros/melodic/share
-ENV ROS_MASTER_URI=http://localhost:11311
-ENV ROS_PYTHON_VERSION=
-ENV ROS_VERSION=1
-ENV PATH=/opt/ros/melodic/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ENV ROSLISP_PACKAGE_DIRECTORIES=
-ENV PYTHONPATH=/opt/ros/melodic/lib/python2.7/dist-packages
-ENV PKG_CONFIG_PATH=/opt/ros/melodic/lib/pkgconfig
-ENV ROS_ETC_DIR=/opt/ros/melodic/etc/ros
-ENV CMAKE_PREFIX_PATH=/opt/ros/melodic
+# Initialize rosdep
+RUN if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then \
+      rosdep init; \
+    fi \
+  && rosdep update
 
 # Create a non-root user
-ARG USERNAME=ros
-ARG USER_UID=1000
-ARG USER_GID=$USER_UID
-
-RUN groupadd --gid $USER_GID $USERNAME \
-  && useradd -s /bin/bash --uid $USER_UID --gid $USER_GID -m $USERNAME \
-  && mkdir /home/$USERNAME/.config && chown $USER_UID:$USER_GID /home/$USERNAME/.config
+RUN groupadd --gid ${USER_GID} ${USERNAME} \
+  && useradd \
+      --uid ${USER_UID} \
+      --gid ${USER_GID} \
+      -m \
+      -s /bin/bash \
+      ${USERNAME} \
+  && mkdir -p /home/${USERNAME}/.config \
+  && chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}
 
 # Set up sudo
-RUN apt-get update \
-  && apt-get install -y sudo \
-  && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME\
-  && chmod 0440 /etc/sudoers.d/$USERNAME \
-  && rm -rf /var/lib/apt/lists/*
+RUN echo "${USERNAME} ALL=(root) NOPASSWD:ALL" \
+      > /etc/sudoers.d/${USERNAME} \
+  && chmod 0440 /etc/sudoers.d/${USERNAME}
 
-# Set autocompletion
-RUN apt-get update && apt-get install -y git-core bash-completion \
-  && echo "if [ -f /opt/ros/${ROS_DISTRO}/setup.bash ]; then source /opt/ros/${ROS_DISTRO}/setup.bash; fi" >> /home/$USERNAME/.bashrc \
-  && rm -rf /var/lib/apt/lists/* 
+# Set ROS environment & autocompletion
+RUN echo \
+    "if [ -f /opt/ros/${ROS_DISTRO}/setup.bash ]; then \
+    source /opt/ros/${ROS_DISTRO}/setup.bash; \
+    fi" \
+    >> /home/${USERNAME}/.bashrc
 
 # Install Gazebo
-RUN apt-get update && apt-get install -y \
-  ros-melodic-gazebo* \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-melodic-gazebo* \
   && rm -rf /var/lib/apt/lists/*
 
-# Expose the nvidia driver to allow opengl 
-# Dependencies for glvnd and X11.
+# Dependencies for NVIDIA/OpenGL and X11
 RUN apt-get update \
- && apt-get install -y -qq --no-install-recommends \
-  libglvnd0 \
-  libgl1 \
-  libglx0 \
-  libegl1 \
-  libxext6 \
-  libx11-6
+  && apt-get install -y --no-install-recommends \
+    libglvnd0 \
+    libgl1 \
+    libglx0 \
+    libegl1 \
+    libxext6 \
+    libx11-6 \
+  && rm -rf /var/lib/apt/lists/*
 
-# Env vars for the nvidia-container-runtime.
-ENV NVIDIA_VISIBLE_DEVICES all
-ENV NVIDIA_DRIVER_CAPABILITIES graphics,utility,compute
-ENV QT_X11_NO_MITSHM 1
+# Environment variables for NVIDIA Container Runtime
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute
+ENV QT_X11_NO_MITSHM=1
 
 
 ###########################################
-# base + cartographer
+# Base + Cartographer
 ###########################################
 FROM base AS cartographer
 
-# Install cartographer
+WORKDIR /opt/cartographer_ws
+
+# Initialize Cartographer workspace
+RUN wstool init src \
+  && wstool merge -t src \
+    https://raw.githubusercontent.com/cartographer-project/cartographer_ros/master/cartographer_ros.rosinstall \
+  && wstool update -t src
+
+# Install Cartographer dependencies
 RUN apt-get update \
-  && apt-get install -y -qq \ 
-  ninja-build \
-  stow \
-  libceres-dev \
-  libopencv-dev \
-  libeigen3-dev \
-  libsuitesparse-dev \
-  lua5.3 \
-  liblua5.3-dev \
+  && rosdep install \
+      --from-paths src \
+      --ignore-src \
+      --rosdistro=${ROS_DISTRO} \
+      -y \
+  && if dpkg -s "ros-${ROS_DISTRO}-abseil-cpp" > /dev/null 2>&1; then \
+       apt-get remove -y "ros-${ROS_DISTRO}-abseil-cpp"; \
+     fi \
   && rm -rf /var/lib/apt/lists/*
 
-# Make cartographer workspace(isolated)
-RUN mkdir /home/${USERNAME}/cartographer_ws
-
-WORKDIR /home/${USERNAME}/cartographer_ws
-
-# Initialize cartographer
-RUN wstool init src \
- && wstool merge -t src https://raw.githubusercontent.com/cartographer-project/cartographer_ros/master/cartographer_ros.rosinstall \
- && wstool update -t src
-
-# Install cartographer dependency
+# Install Abseil
 RUN src/cartographer/scripts/install_abseil.sh
 
-# Build cartographer
-RUN catkin_make_isolated --install --use-ninja -j6
+# Build Cartographer
+RUN /bin/bash -lc \
+    "source /opt/ros/${ROS_DISTRO}/setup.bash \
+    && catkin_make_isolated \
+        --install \
+        --use-ninja \
+        -j$(nproc)"
 
-# Load & Extend installed environment 
-RUN echo "source /root/cartographer_ws/install_isolated/setup.bash --extend" >> ~/.bashrc
+# Load Cartographer environment
+RUN echo \
+    "source /opt/cartographer_ws/install_isolated/setup.bash --extend" \
+    >> /home/${USERNAME}/.bashrc
+
 
 ###########################################
-# cartographer + ugv_sdk + scout_ros
+# Cartographer + ugv_sdk + scout_ros
 ###########################################
-
 FROM cartographer AS scout
 
+# Create catkin workspace
 RUN mkdir -p /home/${USERNAME}/catkin_ws/src
+
 WORKDIR /home/${USERNAME}/catkin_ws/src
 
+# Install SCOUT MINI dependencies
 RUN apt-get update \
-  && apt-get install -y libasio-dev \
+  && apt-get install -y --no-install-recommends \
+    libasio-dev \
   && rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/agilexrobotics/ugv_sdk.git \
-  && git clone https://github.com/agilexrobotics/scout_ros.git \
-  && cd .. \
-  && catkin_make -j6
+# Clone SCOUT MINI ROS packages
+RUN git clone --depth 1 \
+      https://github.com/agilexrobotics/ugv_sdk.git \
+  && git clone --depth 1 \
+      https://github.com/agilexrobotics/scout_ros.git
+
+WORKDIR /home/${USERNAME}/catkin_ws
+
+# Install workspace dependencies
+RUN apt-get update \
+  && rosdep install \
+      --from-paths src \
+      --ignore-src \
+      --rosdistro=${ROS_DISTRO} \
+      -y \
+  && rm -rf /var/lib/apt/lists/*
+
+# Build catkin workspace
+RUN /bin/bash -lc \
+    "source /opt/ros/${ROS_DISTRO}/setup.bash \
+    && source /opt/cartographer_ws/install_isolated/setup.bash \
+    && catkin_make -j$(nproc)"
+
+# Load workspace automatically
+RUN echo \
+    "source /home/${USERNAME}/catkin_ws/devel/setup.bash --extend" \
+    >> /home/${USERNAME}/.bashrc \
+  && chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}
+
+USER ${USERNAME}
+
+WORKDIR /home/${USERNAME}/catkin_ws
+
+CMD ["bash"]
